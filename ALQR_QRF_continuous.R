@@ -17,11 +17,11 @@ generate_cont_data <- function(n){
 
 
 # Main function
-estimate <- function(data,tau){
+estimate <- function(data,tau,nfolds=5){
   output<-list()
   output[["oracle"]]=list("estimate"=NA,"se"=NA)
 
-  # Method: standard quantile regression
+  # Method: standard parametric quantile regression
   tryCatch(
     #try to do this
     {
@@ -49,6 +49,8 @@ estimate <- function(data,tau){
   A <- data[,2]
   Y <- data[,1]
   SL.library <- c("SL.glm", "SL.glmnet" , "SL.randomForest", "SL.gam")
+  
+  # propensity score model
   sl.a <- SuperLearner(Y=A,X=L,SL.library = SL.library)
   m.A <- predict(sl.a, newdata=L)$pred
   
@@ -146,12 +148,8 @@ estimate <- function(data,tau){
   
   # Cross fitting: DML and TMLE
   
-  I1 <- sort(sample(1:n,n/5))
-  I2 <- sort(sample(setdiff(1:n,I1),n/5))
-  I3 <- sort(sample(setdiff(1:n,c(I1,I2)),n/5))
-  I4 <- sort(sample(setdiff(1:n,c(I1,I2,I3)),n/5))
-  I5 <- setdiff(1:n,c(I1,I2,I3,I4))
-  II <- cbind(I1,I2,I3,I4,I5)
+  set.seed(123)
+  folds <- sample(rep(1:nfolds, length.out = n))
   
   psi3CF <- numeric(n)
   EIF3CF <- numeric(n)
@@ -165,12 +163,12 @@ estimate <- function(data,tau){
   f.I <- numeric(n)
   f5CF <- numeric(n)
   
-  for(l in 1:5){
+  for(l in 1:nfolds){
     
     # DMl and TMLE with cross-fitting
     
-    I <- II[,l]
-    IC <- setdiff(1:n,I)
+    I <- folds == l
+    IC <- folds != l
     
     # fit models for nuisance parameters
     sl.aIC <- SuperLearner(Y=A[IC],X=data.frame(L[IC,]),SL.library = SL.library)
@@ -183,17 +181,17 @@ estimate <- function(data,tau){
     qAL.I[I] <- predict(qrf.IC, newdata=AL[I,])$pred
     
     m.A.ICtrain <- predict(sl.aIC, newdata=data.frame(L[IC,]))$pred
-    f.ICtrain <- fk_density(Y[IC]-qAL.ICtrain, x_eval = rep(0,0.8*n))$y
+    f.ICtrain <- fk_density(Y[IC]-qAL.ICtrain, x_eval = rep(0,sum(IC)))$y
     sl.wIC <- SuperLearner(Y=(A[IC]-m.A.ICtrain)/f.ICtrain, X=L[IC,],SL.library = SL.library)
     Ew.I[I] <- predict(sl.wIC, newdata=L[I,])$pred
     
     sl.qAL.IC <- SuperLearner(Y=qAL.ICtrain,X=L[IC,],SL.library = SL.library)
     EqAL.I[I] <- predict(sl.qAL.IC, newdata=L[I,])$pred
   }
-  for(l in 1:5){
-    I <- II[,l]
-    IC <- setdiff(1:n,I)
-    f.I[I] <- fk_density(Y[IC]-qAL.I[IC], x_eval = rep(0,n/5))$y
+  for(l in 1:nfolds){
+    I <- folds == l
+    IC <- folds != l
+    f.I[I] <- fk_density(Y[IC]-qAL.I[IC], x_eval = rep(0,sum(I)))$y
   }
   # psi for every individual
   psi3CF <- (A-m.A.I)*(qAL.I-EqAL.I+(tau-ifelse(Y<=qAL.I,1,0))/f.I)/mean((A-m.A.I)^2)
@@ -211,7 +209,7 @@ estimate <- function(data,tau){
   
   # TMLE (one step)
   
-  wCF <- (A-m.A.I)/fk_density(Y-qAL.I, x_eval = rep(0,n/5))$y   # weights
+  wCF <- (A-m.A.I)/fk_density(Y-qAL.I, x_eval = rep(0,sum(I)))$y   # weights
   
   fYALCF <- function(eps){
     return(sum(wCF*(tau-ifelse(Y-qAL.I <= eps*wCF,1,0))))
@@ -222,10 +220,10 @@ estimate <- function(data,tau){
   qAL.updateCF <- qAL.I + eps.CF*wCF
   
   # psi for every individual
-  for(l in 1:5){
-    I <- II[,l]
-    IC <- setdiff(1:n,I)
-    f5CF[I] <- fk_density(Y[IC]-qAL.updateCF[IC], x_eval = rep(0,n/5))$y
+  for(l in 1:nfolds){
+    I <- folds == l
+    IC <- folds != l
+    f5CF[I] <- fk_density(Y[IC]-qAL.updateCF[IC], x_eval = rep(0,sum(I)))$y
   }
   EqAL.updateCF <- EqAL.I + eps.CF*Ew.I
   psi5CF <- (A-m.A.I)*(qAL.updateCF-EqAL.updateCF+(tau-ifelse(Y<=qAL.updateCF,1,0))/f5CF)/mean((A-m.A.I)^2)
@@ -262,7 +260,7 @@ estimate <- function(data,tau){
 
 # Choose one of the data generating functions defined above within this function
 MonteCarlo_sim<-function(n,tau){
-  data <- generate_data(n)
+  data <- generate_cont_data(n)
   output <- estimate(data,tau)
   ## What the function will return
   return(list("oracle_est"=output$oracle$estimate, "oracle_se"=output$oracle$se, "QR_est"=output$QR$estimate, "QR_SE"=output$QR$se, "PlugIn_est"=output$plugin$estimate, "PlugIn_SE"=output$plugin$se,

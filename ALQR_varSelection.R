@@ -19,12 +19,12 @@ generate_hd_data <- function(n){
 
 
 # Main function
-estimate <- function(data,tau){
+estimate <- function(data,tau,nfolds=5){
   output<-list()
   output[["QRoracle"]]=list("estimate"=NA,"se"=NA)
   output[["QRvs"]]=list("estimate"=NA,"se"=NA)
   
-  # Method: standard quantile regression with stepwise variable selection
+  # Method: standard parametric quantile regression with stepwise variable selection
   tryCatch(
     #try to do this
     {
@@ -57,6 +57,8 @@ estimate <- function(data,tau){
   A <- data[,2]
   Y <- data[,1]
   SL.library <- c("SL.glm", "SL.glmnet" , "SL.randomForest", "SL.gam")
+  
+  # propensity score model
   sl.a <- SuperLearner(Y=A,X=L,SL.library = SL.library)
   m.A <- predict(sl.a, newdata=L)$pred
   
@@ -211,12 +213,8 @@ estimate <- function(data,tau){
   
   # Cross fitting: DML and TMLE
   
-  I1 <- sort(sample(1:n,n/5))
-  I2 <- sort(sample(setdiff(1:n,I1),n/5))
-  I3 <- sort(sample(setdiff(1:n,c(I1,I2)),n/5))
-  I4 <- sort(sample(setdiff(1:n,c(I1,I2,I3)),n/5))
-  I5 <- setdiff(1:n,c(I1,I2,I3,I4))
-  II <- cbind(I1,I2,I3,I4,I5)
+  set.seed(123)
+  folds <- sample(rep(1:nfolds, length.out = n))
   
   psi3CF <- numeric(n)
   EIF3CF <- numeric(n)
@@ -240,12 +238,12 @@ estimate <- function(data,tau){
   Ew.I <- numeric(n)
   Ew.Ivs <- numeric(n)
   
-  for(l in 1:5){
+  for(l in 1:nfolds){
     
     # DMl and TMLE with cross-fitting
     
-    I <- II[,l]
-    IC <- setdiff(1:n,I)
+    I <- folds == l
+    IC <- folds != l
     
     # fit models for nuisance parameters
     sl.aIC <- SuperLearner(Y=A[IC],X=data.frame(L[IC,]),SL.library = SL.library)
@@ -267,18 +265,18 @@ estimate <- function(data,tau){
     coef.I[I] <- as.numeric(fitrqIC$coefficients["A"])
     
     m.A.ICtrain <- predict(sl.aIC, newdata=data.frame(L[IC,]))$pred
-    f.ICtrain <- fk_density(Y[IC]-qAL[IC], x_eval = rep(0,0.8*n))$y
-    f.ICtrainvs <- fk_density(Y[IC]-qALvs[IC], x_eval = rep(0,0.8*n))$y
+    f.ICtrain <- fk_density(Y[IC]-qAL[IC], x_eval = rep(0,sum(IC)))$y
+    f.ICtrainvs <- fk_density(Y[IC]-qALvs[IC], x_eval = rep(0,sum(IC)))$y
     sl.wIC <- SuperLearner(Y=(A[IC]-m.A.ICtrain)/f.ICtrain, X=L[IC,],SL.library = SL.library)
     Ew.I[I] <- predict(sl.wIC, newdata=L[I,])$pred
     sl.wICvs <- SuperLearner(Y=(A[IC]-m.A.ICtrain)/f.ICtrainvs, X=L[IC,],SL.library = SL.library)
     Ew.Ivs[I] <- predict(sl.wICvs, newdata=L[I,])$pred
   }
-  for(l in 1:5){
-    I <- II[,l]
-    IC <- setdiff(1:n,I)
-    f.I[I] <- fk_density(Y[IC]-qAL.I[IC], x_eval = rep(0,n/5))$y
-    f.Ivs[I] <- fk_density(Y[IC]-qAL.Ivs[IC], x_eval = rep(0,n/5))$y
+  for(l in 1:nfolds){
+    I <- folds == l
+    IC <- folds != l
+    f.I[I] <- fk_density(Y[IC]-qAL.I[IC], x_eval = rep(0,sum(I)))$y
+    f.Ivs[I] <- fk_density(Y[IC]-qAL.Ivs[IC], x_eval = rep(0,sum(I)))$y
   }
   # psi for every individual
   psi3CF <- (A-m.A.I)*(qAL.I-EqAL.I+(tau-ifelse(Y<=qAL.I,1,0))/f.I)/mean((A-m.A.I)^2)
@@ -304,17 +302,17 @@ estimate <- function(data,tau){
   
   # TMLE (one step)
   
-  wCF <- (A-m.A.I)/fk_density(Y-qAL.I, x_eval = rep(0,n/5))$y   # weights
+  wCF <- (A-m.A.I)/fk_density(Y-qAL.I, x_eval = rep(0,sum(I)))$y   # weights
   fYALCF <- function(eps){
     return(sum(wCF*(tau-ifelse(Y-qAL.I <= eps*wCF,1,0))))
   }
   eps.CF <- uniroot(fYALCF, c(-1,1))$root
   qAL.updateCF <- qAL.I + eps.CF*wCF
   # psi for every individual
-  for(l in 1:5){
-    I <- II[,l]
-    IC <- setdiff(1:n,I)
-    f5CF[I] <- fk_density(Y[IC]-qAL.updateCF[IC], x_eval = rep(0,n/5))$y
+  for(l in 1:nfolds){
+    I <- folds == l
+    IC <- folds != l
+    f5CF[I] <- fk_density(Y[IC]-qAL.updateCF[IC], x_eval = rep(0,sum(I)))$y
   }
   EqAL.updateCF <- EqAL.I + eps.CF*Ew.I
   psi5CF <- (A-m.A.I)*(qAL.updateCF-EqAL.updateCF+(tau-ifelse(Y<=qAL.updateCF,1,0))/f5CF)/mean((A-m.A.I)^2)
@@ -328,17 +326,17 @@ estimate <- function(data,tau){
   
   
   # TMLE variable selection
-  wCFvs <- (A-m.A.I)/fk_density(Y-qAL.Ivs, x_eval = rep(0,n/5))$y   # weights
+  wCFvs <- (A-m.A.I)/fk_density(Y-qAL.Ivs, x_eval = rep(0,sum(I)))$y   # weights
   fYALCFvs <- function(eps){
     return(sum(wCFvs*(tau-ifelse(Y-qAL.Ivs <= eps*wCFvs,1,0))))
   }
   eps.CFvs <- uniroot(fYALCFvs, c(-1,1))$root
   qALvs.updateCF <- qAL.Ivs + eps.CFvs*wCFvs
   # psi for every individual
-  for(l in 1:5){
-    I <- II[,l]
-    IC <- setdiff(1:n,I)
-    f5CFvs[I] <- fk_density(Y[IC]-qALvs.updateCF[IC], x_eval = rep(0,n/5))$y
+  for(l in 1:nfolds){
+    I <- folds == l
+    IC <- folds != l
+    f5CFvs[I] <- fk_density(Y[IC]-qALvs.updateCF[IC], x_eval = rep(0,sum(I)))$y
   }
   psi5CFvs <- coef.I + eps.CFvs/f5CFvs + (A-m.A.I)*(-eps.CFvs*Ew.I+(tau-ifelse(Y<=qALvs.updateCF,1,0))/f5CFvs)/mean((A-m.A.I)^2)
   # Compute psi averaging over the whole data set
